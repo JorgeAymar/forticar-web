@@ -1,0 +1,90 @@
+#!/usr/bin/expect -f
+
+set timeout 300
+set host "194.163.161.196"
+set user "sysadmin"
+set pass "SysAdmin2025!"
+set domain "forticar.labshub.cc"
+
+# 1. Archive the project locally (this should be run before expect script, but we can assume we run this script after tar)
+# Note: Since this is an expect script, we will just handle the remote commands.
+# We will assume 'project.tar.gz' exists in the current directory.
+
+# 2. Transfer project using SCP
+puts "🚀 Transferring project to $host..."
+spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null project.tar.gz $user@$host:~/forticar-web.tar.gz
+expect {
+    -re "password:" {
+        send "$pass\r"
+        exp_continue
+    }
+    eof
+}
+
+# 3. SSH into VPS and deploy
+puts "🚀 Deploying on $host..."
+spawn ssh -t -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $user@$host "
+    # Clean up previous
+    rm -rf ~/forticar-web
+    mkdir -p ~/forticar-web
+    
+    # Extract
+    tar -xzf ~/forticar-web.tar.gz -C ~/forticar-web
+    
+    # Go to directory
+    cd ~/forticar-web
+    
+    # Build Docker Image
+    echo '🐳 Building Docker image...'
+    sudo docker build -t forticar-web .
+    
+    # Stop existing container if any
+    echo '🛑 Stopping existing container...'
+    sudo docker stop forticar-web || true
+    sudo docker rm forticar-web || true
+    
+    # Run Container
+    echo '▶️ Starting container...'
+    sudo docker run -d --name forticar-web --restart unless-stopped -p 3000:3000 forticar-web
+    
+    # Configure Nginx
+    echo '🌐 Configuring Nginx...'
+    sudo tee /etc/nginx/sites-available/$domain > /dev/null <<EOF
+server {
+    listen 80;
+    server_name $domain;
+
+    location / {
+        proxy_pass http://localhost:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \\\$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host \\\$host;
+        proxy_cache_bypass \\\$http_upgrade;
+    }
+}
+EOF
+    
+    # Enable site
+    sudo ln -sf /etc/nginx/sites-available/$domain /etc/nginx/sites-enabled/
+    
+    # Test and Reload Nginx
+    sudo nginx -t && sudo systemctl reload nginx
+    
+    echo '✅ Deployment Complete!'
+"
+
+# Handle SSH interaction
+expect {
+    -re "password for .*:" {
+        send "$pass\r"
+        exp_continue
+    }
+    -re "password:" {
+        send "$pass\r"
+        exp_continue
+    }
+    eof
+}
+
+puts "Done."
